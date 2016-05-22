@@ -1,0 +1,235 @@
+---
+title: "Extraccion de datos catastrales a cartografia con R"
+author: "Antonio Ripoll"
+date: "Miercoles, 09 de diciembre de 2015"
+output: pdf_document
+---
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+###Extraccion de datos catastrales de ficheros .CAT para incorporacion a la cartografia vectorial con el fin de caracterizar las diferentes zonas del municipio a traves de la creacion de clusters.
+
+Carga de librerias y eleccion del directorio de trababajo en el que han de estar los siguientes ficheros:
+
+A. Fichero descargado de <http://www.sedecatastro.gob.es/> :
+
++  29_900_U_2015-09-26.CAT
+
+![alt text](C:/DadesObertes/GRANOLLERS/DGC.jpg)
+
+
+B.  Ficheros de estructura del registro de datos alfanumericos publicos de la D.G. del Catastro (facilitados por ComunData a peticion):
+
++  estructura11v.csv
++  estructura14v.csv
+
+Directorio de trabajo:
+```{r}
+setwd("c:/DadesObertes/MALAGA")
+```
+
+Es necesario cargar las librerias `reshape` i `dplyr` de <https://cran.r-project.org/web/packages/dplyr/>
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(reshape)
+library(dplyr)
+```
+
+Creacion de los ficheros desagregados para cada tipo de registro:
+
+*  29_900_registros11.txt        parcela catastral
+*  29_900_registros14.txt        unidad catastral (finca)
+
+```{r}
+fichero="29_900_U_2015-09-26.CAT"        # Malaga
+muni="29_900_"
+cat<-readLines(fichero)
+tipos<-c(11,14)
+for (n in tipos){
+        registros11=subset(cat,substr(cat,1,2)==n)
+        if (n==14 | n==15){
+                registros11<-gsub("#","Z",registros11)
+        }
+        grava=writeLines(registros11,paste0(muni,"registros",n,".txt"))
+}
+```
+
+Creacion de ficheros .CSV con nombres de campos para trabajar.
+
+```{r}
+tiposnew<-c(paste0(muni,"registros11"),paste0(muni,"registros14")) 
+for (k in tiposnew){
+        n<-substr(k,17,18)      # 11,13,14 o 15 para Tarragona "43_900_"        
+#         para Granollers Busca los caracteres del numero de registro en el nombre
+#         n<-substr(k,16,17)      
+        nombres<-read.csv(paste0("estructura",n,"v.csv"), sep=";",header=FALSE)
+        leo<-paste0(k,".txt")
+        leido<-read.fwf(leo, nombres$V2, col.names=nombres$V1,skipNul = TRUE)
+        write.csv(leido,paste0(muni,"registros",n,".csv"))
+}
+```
+
+Carga los ficheros .CSV
+
+```{r}
+cat11<-read.csv(paste0(muni,"registros11.csv"), na.strings = 0,stringsAsFactors=FALSE)
+cat14<-read.csv(paste0(muni,"registros14.csv"), na.strings = 0,stringsAsFactors=FALSE)
+# summary(cat14)
+```
+
+Crea un fichero "union" juntando por parcela catastral (parcat) campos de los ficheros de parcela y de unidad catastral (finca)
+Se seleccionan los siguientes campos:
+
+
+1.  De parcela:
++  parcat:       Parcela catastral
++  cx, cy:       Coordenadas x,y
++  suppar:       Superficie de parcela
++  supcons:      Superficie construida total
++  supsobre;     Superficie construida sobre rasante
++  supbajo:      Superficie construida en sotanos
++  supcubierta:  Ocupacion (Proyeccion del edificio)
+
+
+2.  De cada unidad construida (finca)
++  parcat:       Parcela catastral
++  pl:           Planta
++  pu:           Puerta
++  destino:      Destino (uso)
++  antiguedad:   Antiguedad
++  superficie:   Superficie construida de la finca
++  supext:       Superfice exterior (terrazas)
++  supotras:     Superficie otras situaciones
++  tipologia:    Tipologia segun catalogo catastral
+
+
+Para cada parcela se realizan las siguientes operaciones:  
+Para cada uso:
+
+        Se suman las superficies
+        Se obtiene la superficie media
+        Se cuentas el numero de unidades
+        Se obtiene la antiguedad media
+
+```{r}
+union11<-cat11 %>% select(parcat,cx,cy,suppar:supcubierta)
+str(union11)
+union14<-cat14 %>% select(parcat,pl:destino,antiguedad, superficie:tipologia)
+# union 14$edad<-aggregate(union14$antiguedad, list(parcela=union14$parcat),FUN=mean)
+union14$destino[is.na(union14$destino)] <- "   "
+union<-left_join(union11,union14, by="parcat")
+# union<-union11 %>% left_join(union14, by="parcat") 
+union$superficie[is.na(union$superficie)] <- 0
+str(union)
+union$clave<-paste0(union$parcat,substr(union[,"destino"],1,1))
+union$destino<-substr(union[,"destino"],1,1)
+```
+
+```{r, warning=FALSE}
+suma<-summarise(group_by(union,clave),parcat,destino, plantas=as.numeric(max(pl, na.rm=TRUE)),anti=mean(antiguedad),
+                m = mean(superficie), t =sum(superficie), ud=t/m) #BIEN#
+# parcelas<-summarise(group_by(union,parcat),plantas=as.integer(max(pl, na.rm=TRUE)),anti=mean(antiguedad))
+# parcel<-data.frame(parcelas)
+este<-data.frame(suma)
+este$plantas[este$plantas=='NA']<-0
+```
+
+Extrae todos los destinos codificados en este municipio.
+
+```{r}
+# Destinos existentes en Tarragona
+n<-table(substr(union[,"destino"],1,1)) # Codifica por primera letra de usos
+write.table(n,"destino2.csv",col.names=FALSE)
+# Lee destinos de Tarragona
+desti<-read.table("destino2.csv",header=FALSE, col.names=c("id","desti","num"))
+str(desti)
+```
+
+Anade campos de clave de destino en parcelas
+
+```{r}
+# Anade campos de clave de destino en parcelas11 
+nombres=names(union11)
+# ("A": Aparcamiento-Trastero,"V": Vivienda,"C":Comercial,"I":Industrial)
+elige<-c("A","V","C","I")
+for (n in elige){
+        m=paste0("n",n)
+        union11[n]<-0        
+        union11[m]<-0
+        #         SUPERFICIES
+        nombres<-c(nombres,n)
+        #         UNIDADES
+        nombres<-c(nombres,m)
+}
+names(union11)<-nombres
+union11$alto<-0
+```
+
+Para cada parcela:  
+Llena el valor de cada uso con sus datos acumulados:
+        "uso"= numero de metros cuadrados de este uso
+        n"uso"= numero de unidades de este uso
+        
+Usos relevantes para cada parcela:
+
+        A:      Superficie total de uso aparcamiento o trastero
+        V:      Superficie total de uso Vivienda
+        C:      Superficie total de uso comercial
+        I:      Superficie total de uso Industrial
+        
+        nA:     Numero de aparcamientos i trasteros
+        nV:     Numero de viviendas
+        nC:     Numero de locales comerciales
+        nI:     Numero de industrias
+        
+```{r}
+tot<-aggregate(este$t, list(paruso= este$clave), sum)
+totales<-data.frame(tot)
+totales$t<-totales$x
+totales$x<-NULL
+unidades<-aggregate(este$ud, list(paruso= este$clave), sum)
+# Promedio de antiguedades de los usos en parcela
+antiguo<-aggregate(este$anti, list(paruso= este$clave), mean)
+
+altura<-aggregate(as.integer(este$plantas,na.rm=TRUE), list(paruso= este$clave), max)
+
+totales$parcat<-substr(totales$paruso,1,14)
+totales$ud<-unidades$x
+totales$antiguedad<-antiguo$x
+totales$uso<-substr(totales[,"paruso"],15,15)
+totales$alto<-altura$x
+
+union11$edificado<-0 # Identifica la parcela como edificada
+edad<-summarise(group_by(totales,parcat), mean(antiguedad),max(alto))
+edades<-data.frame(edad)
+edades$edad<-as.integer(edades$mean.antiguedad)
+edades$alto<-edades$max.alto
+k=1
+while(k<=nrow(totales)){
+        parcela<-totales[k,"parcat"]
+        uso<-totales[k,"uso"]
+        nuso<-paste0("n",uso)
+        nud<-totales[k,"ud"]
+        
+        if(totales[k,"t"]>0) union11[union11$parcat==parcela, "edificado"]=1
+        
+        union11[union11$parcat==parcela,uso]=totales[k,"t"]
+        union11[union11$parcat==parcela,nuso]=totales[k,"ud"]
+        union11[union11$parcat==parcela,"anti"]=edades[edades$parcat==parcela,"edad"]
+        union11[union11$parcat==parcela,"alto"]=edades[edades$parcat==parcela,"alto"]
+        k=k+1
+}
+
+union11$cx=as.numeric(union11$cx) #coordenadas reales con dos decimales (X100)
+union11$cy=as.numeric(union11$cy)
+# Para estadisticas suprimir na="0"
+write.csv2(union11,paste0(muni,"resultadoSimple.csv"),row.names=FALSE, quote=FALSE, na="0")
+```
+
+Se han guardado los datos creados en union11 en el fichero "resultadoSimple.csv" con la siguiente estructura:
+```{r}
+str(union11)
+```
+
+Este fichero, "resultadoSimple.csv" es importable directamente a CartoDB como tabla.
+Si se vincula al plano parcelario "PARCELA.SHP" se puede generar como mapa
+
+Tarragona a 13 de noviembre de 2015
